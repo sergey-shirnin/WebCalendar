@@ -1,12 +1,17 @@
 import sys
-from flask import Flask
-from flask_restful import Api, Resource, reqparse, inputs
+import datetime
+from flask import Flask, request
+from flask_sqlalchemy import SQLAlchemy
+from flask_restful import Api, Resource, reqparse, inputs, marshal_with, fields
 
 
+TABLE = 'events'
+user_id = 'default'
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///%s.db' % TABLE
+db = SQLAlchemy(app)
 api = Api(app)
 
-parser = reqparse.RequestParser()
 post_args = {
     'event': {
         'type': str,
@@ -17,6 +22,14 @@ post_args = {
         'msg': 'The event date with the correct format is required! The correct format is YYYY-MM-DD!'
     }
 }
+
+resource_fields = {
+    'id': fields.Integer,
+    'event': fields.String,
+    'date': fields.String
+}
+
+parser = reqparse.RequestParser()
 for arg in post_args:
     parser.add_argument(arg,
                         type=post_args[arg]['type'],
@@ -24,14 +37,35 @@ for arg in post_args:
                         required=True)
 
 
+class EventDAO(db.Model):
+    __tablename__ = f'{user_id}_{TABLE}'
+    id = db.Column(db.Integer, primary_key=True)
+    event = db.Column(db.String(80), nullable=False)
+    date = db.Column(db.Date, nullable=False)
+
+
+db.create_all()
+
+
 class GetEventResource(Resource):
+    @marshal_with(resource_fields)
     def get(self):
-        return {"data": "There are no events for today!"}
+        table_data = EventDAO.query.all()
+        return table_data
+
+
+class GetEventTodayResource(Resource):
+    @marshal_with(resource_fields)
+    def get(self):
+        table_data = EventDAO.query.filter(EventDAO.date == datetime.date.today()).all()
+        return [EventDAO(id=row.id, event=row.event, date=row.date) for row in table_data]
 
 
 class PostEventResource(Resource):
     def post(self):
         args = parser.parse_args()
+        new_event = EventDAO(event=args['event'], date=args['date'].date())
+        db.session.add(new_event) ; db.session.commit()
         return {
             "message": "The event has been added!",
             "event": args['event'],
@@ -39,9 +73,9 @@ class PostEventResource(Resource):
         }
 
 
-api.add_resource(GetEventResource, '/event/today')
+api.add_resource(GetEventTodayResource, '/event/today')
+api.add_resource(GetEventResource, '/event')
 api.add_resource(PostEventResource, '/event')
-
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
