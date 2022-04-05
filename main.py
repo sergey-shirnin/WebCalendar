@@ -1,81 +1,93 @@
 import sys
 import datetime
-from flask import Flask, request
-from flask_sqlalchemy import SQLAlchemy
-from flask_restful import Api, Resource, reqparse, inputs, marshal_with, fields
+
+import werkzeug
+from flask import Flask, request, abort, jsonify
+from flask_restful import Api, Resource, marshal_with
+from POST_parser import initiate_post_parser
+from DAO import EventDAO, db, resource_fields, TABLE
 
 
-TABLE = 'events'
-user_id = 'default'
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///%s.db' % TABLE
-db = SQLAlchemy(app)
 api = Api(app)
 
-post_args = {
-    'event': {
-        'type': str,
-        'msg': 'The event name is required!'
-    },
-    'date': {
-        'type': inputs.date,
-        'msg': 'The event date with the correct format is required! The correct format is YYYY-MM-DD!'
-    }
-}
-
-resource_fields = {
-    'id': fields.Integer,
-    'event': fields.String,
-    'date': fields.String
-}
-
-parser = reqparse.RequestParser()
-for arg in post_args:
-    parser.add_argument(arg,
-                        type=post_args[arg]['type'],
-                        help=post_args[arg]['msg'],
-                        required=True)
+db.init_app(app)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///%s.db' % TABLE
+with app.test_request_context():
+    db.create_all()
+app.config['JSON_SORT_KEYS'] = False
 
 
-class EventDAO(db.Model):
-    __tablename__ = f'{user_id}_{TABLE}'
-    id = db.Column(db.Integer, primary_key=True)
-    event = db.Column(db.String(80), nullable=False)
-    date = db.Column(db.Date, nullable=False)
+class NotFoundHTTPException(werkzeug.exceptions.HTTPException):
+    code = 404; description = "The event doesn't exist!"
 
 
-db.create_all()
-
-
-class GetEventResource(Resource):
+class GetEventsResource(Resource):
     @marshal_with(resource_fields)
     def get(self):
-        table_data = EventDAO.query.all()
+        start, end = request.args.get('start_time'), request.args.get('end_time')
+        table_data = EventDAO.query.filter(EventDAO.date >= start, EventDAO.date <= end).all() if start and end \
+            else EventDAO.query.all()  # or -> EventDAO.date.between(start, end)
         return table_data
 
 
-class GetEventTodayResource(Resource):
+class GetEventsTodayResource(Resource):
     @marshal_with(resource_fields)
     def get(self):
         table_data = EventDAO.query.filter(EventDAO.date == datetime.date.today()).all()
-        return [EventDAO(id=row.id, event=row.event, date=row.date) for row in table_data]
+        if table_data:
+            return table_data
+        raise NotFoundHTTPException
+
+
+class GetEventByIdResource(Resource):
+    @marshal_with(resource_fields)
+    def get(self, requested_id):
+        table_data = EventDAO.query.filter(EventDAO.id == requested_id).first()
+        if table_data:
+            return table_data
+        raise NotFoundHTTPException
 
 
 class PostEventResource(Resource):
     def post(self):
         args = parser.parse_args()
         new_event = EventDAO(event=args['event'], date=args['date'].date())
-        db.session.add(new_event) ; db.session.commit()
-        return {
-            "message": "The event has been added!",
-            "event": args['event'],
-            "date": str(args['date'].date())
-        }
+        db.session.add(new_event); db.session.commit()
+        return jsonify(message="The event has been added!", event=args['event'], date=str(args['date'].date()))
 
 
-api.add_resource(GetEventTodayResource, '/event/today')
-api.add_resource(GetEventResource, '/event')
+@app.route('/event/<int:requested_id>', methods=['DELETE'])
+def delete_by_id(requested_id):
+    event_to_delete = EventDAO.query.get(requested_id)
+    if event_to_delete:
+        db.session.delete(event_to_delete); db.session.commit()
+        return jsonify(message="The event has been deleted!")
+    return abort(404)
+
+
+# this will work on any abort(404) call for
+# @app.route functions scope with message pre-specified
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify(message="The event doesn't exist!"), 404
+
+
+# this will work on routine raise Exception call (Resource classes scope)
+# together with
+# NotFoundHTTPExceptionClass
+def handle_404(e):
+    return jsonify(message=str(e)), 404
+
+
+api.add_resource(GetEventsResource, '/event/')
+api.add_resource(GetEventsTodayResource, '/event/today')
+api.add_resource(GetEventByIdResource, '/event/<int:requested_id>/')
+
+parser = initiate_post_parser()
 api.add_resource(PostEventResource, '/event')
+
+app.register_error_handler(NotFoundHTTPException, handle_404)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
